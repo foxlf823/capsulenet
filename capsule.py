@@ -32,9 +32,9 @@ class CapsNet(nn.Module):
     def forward(self, x): # (bs, 1, 28, 28)
         x = F.relu(self.conv1_bn(self.conv1(x))) # (bs, 32, 14, 14)
         
-        pose, activation = self.primary_caps(x) # (bs, 32, 4, 4, 14, 14) (bs, 32, 14, 14)
-        pose, activation = self.conv_capsule1(pose, activation) # (bs, 32, 4, 4, 6, 6) (bs, 32, 6, 6)
-        pose, activation = self.conv_capsule2(pose, activation) # (bs, 32, 4, 4, 4, 4) (bs, 32, 4, 4)
+        pose, activation = self.primary_caps(x) # (bs, 16, 4, 4, 14, 14) (bs, 16, 14, 14)
+        pose, activation = self.conv_capsule1(pose, activation) # (bs, 16, 4, 4, 6, 6) (bs, 16, 6, 6)
+        pose, activation = self.conv_capsule2(pose, activation) # (bs, 16, 4, 4, 4, 4) (bs, 16, 4, 4)
         pose, activation = self.class_capsule(pose, activation) # (bs, 10, 4, 4) (bs, 10)
         return activation
     
@@ -49,11 +49,9 @@ class CapsNet(nn.Module):
         y_gold = myCuda(autograd.Variable(torch.FloatTensor(bs, class_num))).zero_().scatter_(1, target.unsqueeze(1), 9999)
         loss = torch.clamp(0.2-(y_gold-activation), 0, 9999)
         loss = torch.sum(torch.pow(loss, 2), dim=1, keepdim=False).mean()
-        if loss.data[0]>9999:
-            print(y_gold)
-            print(activation)
+
         return loss
-#         return F.cross_entropy(activation, target)
+
     
 class PrimaryCaps(nn.Module):
     def __init__(self, A, B):
@@ -69,10 +67,10 @@ class PrimaryCaps(nn.Module):
     def forward(self, x): # (bs, 32, 14, 14)
         bs = x.size(0)
         
-        pose = self.conv_pose(x) # (bs, 32*4*4, 14, 14)
+        pose = self.conv_pose(x) # (bs, 16*4*4=256, 14, 14)
         pose = pose.view(bs, self.B, self.pose_size[0], self.pose_size[1], pose.size(-2), pose.size(-1))
         
-        activation = F.sigmoid(self.conv_activation_bn(self.conv_activation(x))) # (bs, 32, 14, 14)
+        activation = F.sigmoid(self.conv_activation_bn(self.conv_activation(x))) # (bs, 16, 14, 14)
 
         return pose, activation
     
@@ -98,7 +96,7 @@ class ConvCaps(nn.Module):
         self.tile_filter_activation_bn = nn.BatchNorm2d(self.tile_filter_activation_outchannel)
         
         self.kernel_cap_num = self.in_cap_num*self.kernel_size*self.kernel_size
-        # (32x9=288, 32, 4, 4)
+        # (16x9=144, 32, 4, 4)
         self.W = nn.Parameter(torch.randn(self.kernel_cap_num , self.out_cap_num, self.pose_size, self.pose_size))
         
         self.beta_u = nn.Parameter(torch.randn(self.out_cap_num))
@@ -106,32 +104,32 @@ class ConvCaps(nn.Module):
         
         
         
-    def forward(self, pose, activation): # (bs, 32, 4, 4, 14, 14) (bs, 32, 14, 14)
+    def forward(self, pose, activation): # (bs, 16, 4, 4, 14, 14) (bs, 16, 14, 14)
         bs = pose.size(0)
-        # (bs, 32x4x4=512, 14, 14)
+        # (bs, 16x4x4=256, 14, 14)
         pose = pose.contiguous().view(-1, self.tile_filter_pose_inchannel, pose.size(-2), pose.size(-1))
-        pose = self.tile_filter_pose(pose) # (bs, 32x4x4x3x3=512x9=4608, 6, 6)
-        # (bs, 32x9=288, 4, 4, 6, 6)
+        pose = self.tile_filter_pose(pose) # (bs, 16x4x4x3x3=2304, 6, 6)
+        # (bs, 144, 4, 4, 6, 6)
         pose = pose.view(bs, self.tile_filter_activation_outchannel, self.pose_size, self.pose_size, pose.size(-2), pose.size(-1))
-        # (bs, 32x9=288, 6, 6)
+        # (bs, 144, 6, 6)
         activation = F.sigmoid(self.tile_filter_activation_bn(self.tile_filter_activation(activation)))
         
-        pose = pose.permute(0, 4, 5, 1, 2, 3) # (bs, 6, 6, 32x9=288, 4, 4)
-        pose = pose.unsqueeze(dim=4) # (bs, 6, 6, 32x9=288, 1, 4, 4)
+        pose = pose.permute(0, 4, 5, 1, 2, 3) # (bs, 6, 6, 144, 4, 4)
+        pose = pose.unsqueeze(dim=4) # (bs, 6, 6, 144, 1, 4, 4)
         W = self.W.view(1, 1, 1, self.kernel_cap_num , self.out_cap_num, self.pose_size, self.pose_size)
-        vote = torch.matmul(pose, W) # (bs, 6, 6, 288, 32, 4, 4)
-        vote = vote.view(bs, vote.size(1), vote.size(2), vote.size(3), vote.size(4), -1) # (bs, 6, 6, 288, 32, 16)
+        vote = torch.matmul(pose, W) # (bs, 6, 6, 144, 16, 4, 4)
+        vote = vote.view(bs, vote.size(1), vote.size(2), vote.size(3), vote.size(4), -1) # (bs, 6, 6, 144, 16, 16)
         
-        activation = activation.permute(0, 2, 3, 1) # (bs, 6, 6, 288)
+        activation = activation.permute(0, 2, 3, 1) # (bs, 6, 6, 144)
         
-        # poses: (bs, 6, 6, 32, 16) , activations: (bs, 6, 6, 32)
+        # poses: (bs, 6, 6, 16, 16) , activations: (bs, 6, 6, 16)
         pose, activation = matrix_capsules_em_routing2(
               vote, activation, self.beta_u, self.beta_a, self.iterations)
         
         pose = pose.view(bs, pose.size(1), pose.size(2), self.out_cap_num, self.pose_size, self.pose_size)
         pose = pose.permute(0, 3, 4, 5, 1, 2)
         activation = activation.permute(0, 3, 1, 2)
-        # poses: (bs, 32, 4, 4, 6, 6) , activations: (bs, 32, 6, 6)
+        # poses: (bs, 16, 4, 4, 6, 6) , activations: (bs, 16, 6, 6)
         return pose, activation
     
 class ClassCaps(nn.Module):
@@ -151,17 +149,17 @@ class ClassCaps(nn.Module):
         self.beta_u = nn.Parameter(torch.randn(self.out_cap_num))
         self.beta_a = nn.Parameter(torch.randn(self.out_cap_num))
         
-    def forward(self, pose, activation): # (bs, 32, 4, 4, 4, 4) (bs, 32, 4, 4)
+    def forward(self, pose, activation): # (bs, 16, 4, 4, 4, 4) (bs, 16, 4, 4)
         
         bs = pose.size(0)
         
-        pose = pose.permute(0, 4, 5, 1, 2, 3) # (bs, 4, 4, 32, 4, 4)
-        pose = pose.unsqueeze(dim=4) # (bs, 4, 4, 32, 1, 4, 4)
+        pose = pose.permute(0, 4, 5, 1, 2, 3) # (bs, 4, 4, 16, 4, 4)
+        pose = pose.unsqueeze(dim=4) # (bs, 4, 4, 16, 1, 4, 4)
         W = self.W.view(1, 1, 1, self.kernel_cap_num , self.out_cap_num, self.pose_size, self.pose_size)
-        vote = torch.matmul(pose, W) # (bs, 4, 4, 32, 10, 4, 4)
-        vote = vote.view(bs, -1, vote.size(4), self.pose_size*self.pose_size) # (bs, 512, 10, 16)
+        vote = torch.matmul(pose, W) # (bs, 4, 4, 16, 10, 4, 4)
+        vote = vote.view(bs, -1, vote.size(4), self.pose_size*self.pose_size) # (bs, 256, 10, 16)
         
-        activation = activation.contiguous().view(bs, -1) # (bs, 512)
+        activation = activation.contiguous().view(bs, -1) # (bs, 256)
         
         # poses: (bs, 10, 16) , activations: (bs, 10)
         pose, activation = matrix_capsules_em_routing2(
